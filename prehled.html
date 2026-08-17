@@ -569,25 +569,26 @@
     opts = opts || {};
     let pPr = '';
     if(opts.align) pPr += '<w:jc w:val="' + opts.align + '"/>';
+    if(opts.pageBreakBefore) pPr += '<w:pageBreakBefore/>';
     pPr += '<w:spacing w:after="' + (opts.spacingAfter != null ? opts.spacingAfter : 0) + '"/>';
     const r = text != null ? docxRun(text, opts) : '';
     return '<w:p><w:pPr>' + pPr + '</w:pPr>' + r + '</w:p>';
   }
 
-  function docxPageBreak(){
-    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-  }
-
   function docxHeaderTable(leftLines, rightLines){
-    const leftW = 4300, rightW = 4726;
+    // Mezisloupec (gutter) mezi adresou úřadu a blokem s č.j. — bez něj
+    // sloupce splývaly těsně vedle sebe. Pravý blok tak začíná výrazně
+    // víc vpravo, blíž k pravému okraji stránky.
+    const leftW = 3600, gutterW = 2200, rightW = 3226;
     const cell = (lines, w) => '<w:tc><w:tcPr><w:tcW w:w="' + w + '" w:type="dxa"/></w:tcPr>' +
       lines.map(t => docxPara(t, { size: 19, spacingAfter: 20 })).join('') + '</w:tc>';
+    const emptyCell = (w) => '<w:tc><w:tcPr><w:tcW w:w="' + w + '" w:type="dxa"/></w:tcPr>' + docxPara('', { size: 19 }) + '</w:tc>';
     return '<w:tbl><w:tblPr><w:tblW w:w="9026" w:type="dxa"/><w:tblBorders>' +
       '<w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/>' +
       '<w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>' +
       '<w:tblLayout w:type="fixed"/></w:tblPr>' +
-      '<w:tblGrid><w:gridCol w:w="' + leftW + '"/><w:gridCol w:w="' + rightW + '"/></w:tblGrid>' +
-      '<w:tr>' + cell(leftLines, leftW) + cell(rightLines, rightW) + '</w:tr></w:tbl>';
+      '<w:tblGrid><w:gridCol w:w="' + leftW + '"/><w:gridCol w:w="' + gutterW + '"/><w:gridCol w:w="' + rightW + '"/></w:tblGrid>' +
+      '<w:tr>' + cell(leftLines, leftW) + emptyCell(gutterW) + cell(rightLines, rightW) + '</w:tr></w:tbl>';
   }
 
   function docxNarrowBoxTable(widthMm, innerXml){
@@ -600,7 +601,7 @@
       '<w:tr><w:tc><w:tcPr><w:tcW w:w="' + w + '" w:type="dxa"/></w:tcPr>' + innerXml + '</w:tc></w:tr></w:tbl>';
   }
 
-  function docxImageParagraph(relId, widthPx, heightPx, maxWmm, maxHmm, docId){
+  function docxImageParagraph(relId, widthPx, heightPx, maxWmm, maxHmm, docId, pageBreakBefore){
     const aspect = heightPx / widthPx;
     let wMm = maxWmm, hMm = wMm * aspect;
     if(hMm > maxHmm){ hMm = maxHmm; wMm = hMm / aspect; }
@@ -617,7 +618,8 @@
       '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + emuW + '" cy="' + emuH + '"/></a:xfrm>' +
       '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
       '</a:graphicData></a:graphic></wp:inline></w:drawing>';
-    return '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r>' + drawing + '</w:r></w:p>';
+    const pPr = '<w:pPr>' + (pageBreakBefore ? '<w:pageBreakBefore/>' : '') + '<w:jc w:val="center"/></w:pPr>';
+    return '<w:p>' + pPr + '<w:r>' + drawing + '</w:r></w:p>';
   }
 
   function getImagePixelSize(dataUrl){
@@ -661,7 +663,7 @@
       ', z jehož spáchání je důvodně podezřelý(á):';
     body += docxPara(intro, { size: 20, spacingAfter: 200 });
 
-    body += docxPara('Provozovatel vozidla RZ:\t' + (record.plate || ''), { size: 20, spacingAfter: 200 });
+    body += docxPara('Provozovatel vozidla RZ:    ' + (record.plate || ''), { size: 20, spacingAfter: 200 });
     body += docxPara('Příjmení a jméno: ', { size: 20, spacingAfter: 200 });
     body += docxPara('Datum narození: ', { size: 20, spacingAfter: 200 });
     body += docxPara('Bydliště: ', { size: 20, spacingAfter: 200 });
@@ -692,22 +694,19 @@
     let docId = 1;
 
     if(photosB64.length){
-      body += docxPageBreak();
-      body += docxPara('Fotodokumentace', { bold: true, size: 24, align: 'center', spacingAfter: 200 });
+      body += docxPara('Fotodokumentace', { bold: true, size: 24, align: 'center', spacingAfter: 200, pageBreakBefore: true });
       for(let i=0;i<photosB64.length;i++){
         const dims = await getImagePixelSize('data:image/jpeg;base64,' + photosB64[i]);
         const filename = 'image' + (i + 1) + '.jpeg';
         mediaFiles.push({ name: filename, bytes: base64ToUint8Array(photosB64[i]) });
         relEntries.push({ id: relId, target: 'media/' + filename });
-        body += docxImageParagraph(relId, dims.w, dims.h, 170, 240, docId);
+        body += docxImageParagraph(relId, dims.w, dims.h, 170, 240, docId, i > 0);
         relId++; docId++;
-        if(i < photosB64.length - 1) body += docxPageBreak();
       }
     }
 
     // Výzva — úzký orámovaný blok v šíři 58 mm (odpovídá reálné šířce tiskárny).
-    body += docxPageBreak();
-    body += docxPara('Výzva', { bold: true, size: 24, align: 'center', spacingAfter: 200 });
+    body += docxPara('Výzva', { bold: true, size: 24, align: 'center', spacingAfter: 200, pageBreakBefore: true });
     let inner = '';
     inner += docxPara('VÝZVA', { bold: true, size: 22, align: 'center' });
     inner += docxPara('pro nepřítomného pachatele přestupku', { size: 14, align: 'center' });
