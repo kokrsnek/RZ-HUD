@@ -18,6 +18,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" onerror="console.warn('JSZip se nenačetl — export Oznámení jako .docx nebude funkční.')"></script>
 <!-- Star webPRNT SDK — viz komentář v index.html, stejné soubory v /js/ -->
 <script src="StarWebPrintBuilder.js" onerror="console.warn('Star webPRNT SDK nenalezen — tlačítko Tisk nebude funkční.')"></script>
 <script src="StarWebPrintTrader.js" onerror="console.warn('Star webPRNT SDK nenalezen — tlačítko Tisk nebude funkční.')"></script>
@@ -525,11 +526,11 @@
     return badge ? ('str. ' + badge) : ('str. ' + officerName);
   }
 
-  // ---------- Export "Oznámení přestupku" do Wordu (.rtf) ----------
-  // RTF místo skutečného .docx záměrně — Word (macOS/Windows i mobilní appka)
-  // ho otevře bez varování a bez nutnosti tahat do appky knihovnu na stavbu
-  // OOXML/zip. Znaky mimo ASCII (diakritika, §) se escapují jako \uNNNN, aby
-  // se zobrazily správně bez ohledu na výchozí kódování dokumentu.
+  // ---------- Export "Oznámení přestupku" jako skutečný .docx ----------
+  // Skutečný OOXML (.docx) balíček přes JSZip (CDN, žádný build krok) —
+  // ne RTF ani HTML převlečené za .doc. Umožňuje to i věrné dvousloupcové
+  // rozvržení hlavičky (adresa úřadu vlevo, č.j./vyřizuje/tel/e-mail/datum
+  // vpravo) přes běžnou Word tabulku bez viditelných ohraničení.
   //
   // Šablona vychází z reálného vzoru "Oznámení přestupku" (Městský úřad
   // Blansko, odbor dopravy). Appka doplní jen to, co sama zná — číslo
@@ -540,10 +541,10 @@
   const OZNAMENI_TEL = '775 859 486, 516 418 418';
   const OZNAMENI_EMAIL = 'mp@blansko.cz';
 
-  function rtfEscape(str){
+  function xmlEscape(str){
     return String(str == null ? '' : str)
-      .replace(/[\\{}]/g, c => '\\' + c)
-      .replace(/[\u0080-\uffff]/g, c => '\\u' + c.charCodeAt(0) + '?');
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
   }
 
   function todayCz(){
@@ -553,14 +554,70 @@
   }
 
   function mmToTwips(mm){ return Math.round(mm * 56.6929); }
+  function mmToEmu(mm){ return Math.round(mm * 36000); }
 
-  function base64ToHex(base64){
-    const raw = atob(base64);
-    const parts = new Array(raw.length);
-    for(let i=0;i<raw.length;i++){
-      parts[i] = raw.charCodeAt(i).toString(16).padStart(2,'0');
-    }
-    return parts.join('');
+  function docxRun(text, opts){
+    opts = opts || {};
+    let props = '<w:sz w:val="' + (opts.size || 20) + '"/>';
+    if(opts.bold) props += '<w:b/>';
+    if(opts.italic) props += '<w:i/>';
+    if(opts.underline) props += '<w:u w:val="single"/>';
+    return '<w:r><w:rPr>' + props + '</w:rPr><w:t xml:space="preserve">' + xmlEscape(text) + '</w:t></w:r>';
+  }
+
+  function docxPara(text, opts){
+    opts = opts || {};
+    let pPr = '';
+    if(opts.align) pPr += '<w:jc w:val="' + opts.align + '"/>';
+    pPr += '<w:spacing w:after="' + (opts.spacingAfter != null ? opts.spacingAfter : 0) + '"/>';
+    const r = text != null ? docxRun(text, opts) : '';
+    return '<w:p><w:pPr>' + pPr + '</w:pPr>' + r + '</w:p>';
+  }
+
+  function docxPageBreak(){
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+  }
+
+  function docxHeaderTable(leftLines, rightLines){
+    const leftW = 4300, rightW = 4726;
+    const cell = (lines, w) => '<w:tc><w:tcPr><w:tcW w:w="' + w + '" w:type="dxa"/></w:tcPr>' +
+      lines.map(t => docxPara(t, { size: 19, spacingAfter: 20 })).join('') + '</w:tc>';
+    return '<w:tbl><w:tblPr><w:tblW w:w="9026" w:type="dxa"/><w:tblBorders>' +
+      '<w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/>' +
+      '<w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>' +
+      '<w:tblLayout w:type="fixed"/></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="' + leftW + '"/><w:gridCol w:w="' + rightW + '"/></w:tblGrid>' +
+      '<w:tr>' + cell(leftLines, leftW) + cell(rightLines, rightW) + '</w:tr></w:tbl>';
+  }
+
+  function docxNarrowBoxTable(widthMm, innerXml){
+    const w = mmToTwips(widthMm);
+    return '<w:tbl><w:tblPr><w:tblW w:w="' + w + '" w:type="dxa"/><w:jc w:val="center"/><w:tblBorders>' +
+      '<w:top w:val="single" w:sz="8" w:color="000000"/><w:left w:val="single" w:sz="8" w:color="000000"/>' +
+      '<w:bottom w:val="single" w:sz="8" w:color="000000"/><w:right w:val="single" w:sz="8" w:color="000000"/>' +
+      '</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="' + w + '"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:tcPr><w:tcW w:w="' + w + '" w:type="dxa"/></w:tcPr>' + innerXml + '</w:tc></w:tr></w:tbl>';
+  }
+
+  function docxImageParagraph(relId, widthPx, heightPx, maxWmm, maxHmm, docId){
+    const aspect = heightPx / widthPx;
+    let wMm = maxWmm, hMm = wMm * aspect;
+    if(hMm > maxHmm){ hMm = maxHmm; wMm = hMm / aspect; }
+    const emuW = mmToEmu(wMm), emuH = mmToEmu(hMm);
+    const drawing = '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+      '<wp:extent cx="' + emuW + '" cy="' + emuH + '"/>' +
+      '<wp:docPr id="' + docId + '" name="Photo' + docId + '"/>' +
+      '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+      '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<pic:nvPicPr><pic:cNvPr id="' + docId + '" name="Photo' + docId + '"/><pic:cNvPicPr/></pic:nvPicPr>' +
+      '<pic:blipFill><a:blip r:embed="rId' + relId + '" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>' +
+      '<a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+      '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + emuW + '" cy="' + emuH + '"/></a:xfrm>' +
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
+      '</a:graphicData></a:graphic></wp:inline></w:drawing>';
+    return '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r>' + drawing + '</w:r></w:p>';
   }
 
   function getImagePixelSize(dataUrl){
@@ -572,125 +629,140 @@
     });
   }
 
-  async function rtfPictureBlockFit(base64Jpeg, maxWidthMm, maxHeightMm){
-    const dims = await getImagePixelSize('data:image/jpeg;base64,' + base64Jpeg);
-    const hex = base64ToHex(base64Jpeg);
-    const aspect = dims.h / dims.w;
-    let goalWmm = maxWidthMm;
-    let goalHmm = goalWmm * aspect;
-    if(goalHmm > maxHeightMm){
-      goalHmm = maxHeightMm;
-      goalWmm = goalHmm / aspect;
-    }
-    const goalW = mmToTwips(goalWmm);
-    const goalH = mmToTwips(goalHmm);
-    return '{\\pict\\jpegblip\\picw' + dims.w + '\\pich' + dims.h +
-      '\\picwgoal' + goalW + '\\pichgoal' + goalH + '\n' + hex + '}\\par\n';
+  function base64ToUint8Array(base64){
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for(let i=0;i<raw.length;i++) arr[i] = raw.charCodeAt(i);
+    return arr;
   }
 
-
-
-  async function buildOznameniRtf(record, photosB64){
-    const line = (s) => rtfEscape(s) + '\\par\n';
-    let rtf = '{\\rtf1\\ansi\\ansicpg1250\\deff0{\\fonttbl{\\f0 Calibri;}}\\fs20\\f0\n';
-
-    rtf += line('Městský úřad Blansko');
-    rtf += line('Odbor dopravy');
-    rtf += line('Oddělení dopravních přestupků');
-    rtf += line('Nám. Republiky 1');
-    rtf += line('678 01 BLANSKO');
-    rtf += '\\par\n';
-    rtf += rtfEscape('Naše  č. j.: ') + '\\b ' + rtfEscape(record.noticeNumber || '') + '\\b0\\par\n';
-    rtf += rtfEscape('Vyřizuje:    str. ' + (record.officerName || '')) + '\\par\n';
-    rtf += rtfEscape('Tel.:\t    ' + OZNAMENI_TEL) + '\\par\n';
-    rtf += rtfEscape('E-mail:\t   ' + OZNAMENI_EMAIL) + '\\par\n';
-    rtf += '\\par\n';
-    rtf += rtfEscape('Datum:\t    ' + todayCz()) + '\\par\n';
-    rtf += '\\par\\par\n';
-
-    rtf += '\\qc\\b\\fs28 ' + line('Oznámení přestupku') + '\\b0\\fs20\\ql\n';
-    rtf += '\\par\n';
-
+  async function buildOznameniDocx(record, photosB64){
     const offenseCitation = record.offenseCitation || '';
     const offenseLabel = record.offenseLabel || '';
 
-    rtf += rtfEscape(
-      'Podle § 10 odst. 2 zák. č. 553/91 Sb., o obecní policii, ve znění pozdějších předpisů, ' +
+    let body = '';
+    body += docxHeaderTable(
+      ['Městský úřad Blansko', 'Odbor dopravy', 'Oddělení dopravních přestupků', 'Nám. Republiky 1', '678 01 BLANSKO'],
+      [
+        'Naše  č. j.: ' + (record.noticeNumber || ''),
+        'Vyřizuje: str. ' + (record.officerName || ''),
+        'Tel.: ' + OZNAMENI_TEL,
+        'E-mail: ' + OZNAMENI_EMAIL,
+        '',
+        'Datum: ' + todayCz()
+      ]
+    );
+    body += docxPara('', { size: 20 });
+    body += docxPara('Oznámení přestupku', { bold: true, size: 28, align: 'center', spacingAfter: 200 });
+
+    const intro = 'Podle § 10 odst. 2 zák. č. 553/91 Sb., o obecní policii, ve znění pozdějších předpisů, ' +
       'Vám oznamuji podezření ze spáchání přestupku: Zákon č. 361/2000 Sb., o provozu na ' +
       'pozemních komunikacích – ' + offenseCitation + ', jímž se dopustil(a) jednání – ' + offenseLabel +
-      ', z jehož spáchání je důvodně podezřelý(á):'
-    ) + '\\par\\par\n';
+      ', z jehož spáchání je důvodně podezřelý(á):';
+    body += docxPara(intro, { size: 20, spacingAfter: 200 });
 
-    rtf += rtfEscape('Provozovatel vozidla RZ:\t' + (record.plate || '')) + '\\par\\par\n';
-    rtf += rtfEscape('Příjmení a jméno: \t\t') + '\\par\\par\n';
-    rtf += rtfEscape('Datum narození: \t\t') + '\\par\\par\n';
-    rtf += rtfEscape('Bydliště: \t\t\t') + '\\par\\par\n';
+    body += docxPara('Provozovatel vozidla RZ:\t' + (record.plate || ''), { size: 20, spacingAfter: 200 });
+    body += docxPara('Příjmení a jméno: ', { size: 20, spacingAfter: 200 });
+    body += docxPara('Datum narození: ', { size: 20, spacingAfter: 200 });
+    body += docxPara('Bydliště: ', { size: 20, spacingAfter: 200 });
 
-    rtf += '\\b ' + line('Popis skutku:') + '\\b0\n';
-
+    body += docxPara('Popis skutku:', { bold: true, size: 20, spacingAfter: 100 });
     let gpsPart = '';
     if(record.lat != null && record.lng != null){
       gpsPart = ' (GPS: ' + Number(record.lat).toFixed(6) + ', ' + Number(record.lng).toFixed(6) + ')';
     }
-    rtf += rtfEscape(
-      'Dne ' + formatDateCz(record.date) + ' v ' + (record.time || '—') + ' hodin se neustanovený ' +
+    const skutek = 'Dne ' + formatDateCz(record.date) + ' v ' + (record.time || '—') + ' hodin se neustanovený ' +
       'řidič vozidla registrační značky ' + (record.plate || '') + '. Na ulici ' + (record.address || '') +
       gpsPart + ' dopustil porušení ustanovení – ' + offenseLabel +
-      ', a tím je podezřelý ze spáchání přestupku dle ' + offenseCitation
-    ) + '\\par\\par\n';
+      ', a tím je podezřelý ze spáchání přestupku dle ' + offenseCitation;
+    body += docxPara(skutek, { size: 20, spacingAfter: 200 });
 
-    rtf += rtfEscape('Lustrací byl(a), jako provozovatel výše uvedeného vozidla, zjištěn(a) výše jmenovaný(á).') + '\\par\\par\\par\n';
+    body += docxPara('Lustrací byl(a), jako provozovatel výše uvedeného vozidla, zjištěn(a) výše jmenovaný(á).', { size: 20, spacingAfter: 400 });
 
-    rtf += line('Ing. Martin Lepka');
-    rtf += line('ředitel MP Blansko');
-    rtf += '\\par\n';
+    body += docxPara('Ing. Martin Lepka', { size: 20 });
+    body += docxPara('ředitel MP Blansko', { size: 20, spacingAfter: 200 });
+    body += docxPara('Přílohy:', { size: 20 });
+    body += docxPara('- Výzva', { size: 20 });
+    body += docxPara('- fotodokumentace', { size: 20 });
 
-    rtf += rtfEscape('Přílohy:\t') + '\\par\n';
-    rtf += rtfEscape('- Výzva') + '\\par\n';
-    rtf += rtfEscape('- fotodokumentace') + '\\par\n';
+    // Fotky — každá na vlastní A4 stránce v běžné velikosti.
+    const mediaFiles = [];
+    const relEntries = [];
+    let relId = 100;
+    let docId = 1;
 
-    // Nová stránka: každá fotka samostatně na vlastní A4 stránce v běžné
-    // velikosti (jen zmenšená tak, aby se vešla na stránku), výzva zvlášť
-    // v šíři 58 mm (odpovídá reálné šířce tiskárny).
     if(photosB64.length){
-      rtf += '\\page\n';
-      rtf += '\\qc\\b\\fs24 ' + line('Fotodokumentace') + '\\b0\\fs20\\ql\n';
-      rtf += '\\par\n';
-      rtf += '\\qc\n';
+      body += docxPageBreak();
+      body += docxPara('Fotodokumentace', { bold: true, size: 24, align: 'center', spacingAfter: 200 });
       for(let i=0;i<photosB64.length;i++){
-        rtf += await rtfPictureBlockFit(photosB64[i], 170, 240);
-        if(i < photosB64.length - 1) rtf += '\\page\\qc\n';
+        const dims = await getImagePixelSize('data:image/jpeg;base64,' + photosB64[i]);
+        const filename = 'image' + (i + 1) + '.jpeg';
+        mediaFiles.push({ name: filename, bytes: base64ToUint8Array(photosB64[i]) });
+        relEntries.push({ id: relId, target: 'media/' + filename });
+        body += docxImageParagraph(relId, dims.w, dims.h, 170, 240, docId);
+        relId++; docId++;
+        if(i < photosB64.length - 1) body += docxPageBreak();
       }
     }
 
-    rtf += '\\page\n';
-    rtf += '\\qc\\b\\fs24 ' + line('Výzva') + '\\b0\\fs20\\ql\n';
-    rtf += '\\par\n';
-    rtf += '\\qc\n';
-
-    const cellWidth = mmToTwips(58);
-    rtf += '\\trowd\\trgaph80\\trleft0\\trbrdrt\\brdrs\\brdrw10\\trbrdrl\\brdrs\\brdrw10\\trbrdrb\\brdrs\\brdrw10\\trbrdrr\\brdrs\\brdrw10\\cellx' + cellWidth + '\n';
-    rtf += '\\intbl\\qc\\b\\fs22 ' + line('VÝZVA') + '\\b0\\fs14 ' + line('pro nepřítomného pachatele přestupku');
-    if(record.noticeNumber) rtf += '\\fs12 ' + line('Č. j.: ' + record.noticeNumber);
-    rtf += '\\par\n';
-    rtf += '\\b\\fs32 ' + line(record.plate || '') + '\\b0\\fs14\n';
-    rtf += line('Datum: ' + formatDateCz(record.date) + '  Čas: ' + (record.time || '—'));
-    rtf += '\\par\n';
+    // Výzva — úzký orámovaný blok v šíři 58 mm (odpovídá reálné šířce tiskárny).
+    body += docxPageBreak();
+    body += docxPara('Výzva', { bold: true, size: 24, align: 'center', spacingAfter: 200 });
+    let inner = '';
+    inner += docxPara('VÝZVA', { bold: true, size: 22, align: 'center' });
+    inner += docxPara('pro nepřítomného pachatele přestupku', { size: 14, align: 'center' });
+    if(record.noticeNumber) inner += docxPara('Č. j.: ' + record.noticeNumber, { size: 12, align: 'center', spacingAfter: 100 });
+    inner += docxPara(record.plate || '', { bold: true, size: 32, align: 'center' });
+    inner += docxPara('Datum: ' + formatDateCz(record.date) + '  Čas: ' + (record.time || '—'), { size: 14, align: 'center', spacingAfter: 100 });
     if(record.address){
-      rtf += '\\b\\fs13 ' + line('Místo přestupku') + '\\b0\n';
-      rtf += line(record.address);
-      rtf += '\\par\n';
+      inner += docxPara('Místo přestupku', { bold: true, size: 13, align: 'center' });
+      inner += docxPara(record.address, { size: 14, align: 'center', spacingAfter: 100 });
     }
     if(offenseLabel){
-      rtf += '\\b\\fs13 ' + line('Právní kvalifikace') + '\\b0\n';
-      rtf += line(offenseLabel);
-      if(offenseCitation) rtf += '\\fs11 ' + line(offenseCitation) + '\\fs14\n';
+      inner += docxPara('Právní kvalifikace', { bold: true, size: 13, align: 'center' });
+      inner += docxPara(offenseLabel, { size: 14, align: 'center' });
+      if(offenseCitation) inner += docxPara(offenseCitation, { size: 11, align: 'center' });
     }
-    rtf += '\\cell\\row\n';
-    rtf += '\\pard\\par\n';
+    body += docxNarrowBoxTable(58, inner);
 
-    rtf += '}';
-    return rtf;
+    const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+      'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<w:body>' + body +
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>' +
+      '</w:sectPr></w:body></w:document>';
+
+    const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Default Extension="jpeg" ContentType="image/jpeg"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>';
+
+    const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '</Relationships>';
+
+    const docRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      relEntries.map(e => '<Relationship Id="rId' + e.id + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="' + e.target + '"/>').join('') +
+      '</Relationships>';
+
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', contentTypes);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('word/document.xml', documentXml);
+    zip.file('word/_rels/document.xml.rels', docRels);
+    mediaFiles.forEach(m => zip.file('word/media/' + m.name, m.bytes));
+
+    return zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    });
   }
 
   async function exportOznameni(record){
@@ -699,6 +771,10 @@
     btn.disabled = true;
     btn.textContent = 'Připravuji…';
     try{
+      if(typeof JSZip === 'undefined'){
+        setDetailNote('Export do Wordu se nepodařilo načíst (chybí knihovna JSZip — zkontrolujte připojení k internetu).', 'err');
+        return;
+      }
       // Fotky mohly být v této session už dřív načtené (viz openDetail /
       // loadAndShowPhotos) — jinak je stejným způsobem dotáhneme teď.
       let photosB64 = record._resolvedPhotos;
@@ -709,11 +785,10 @@
         record._resolvedPhotos = photosB64;
         record._resolvedMime = (data && data.photoMime) || 'image/jpeg';
       }
-      const rtf = await buildOznameniRtf(record, photosB64 || []);
-      const blob = new Blob([rtf], { type: 'application/rtf' });
-      const filename = 'Oznameni_' + (record.plate || 'prestupek').replace(/\s+/g,'') + '.rtf';
+      const blob = await buildOznameniDocx(record, photosB64 || []);
+      const filename = 'Oznameni_' + (record.plate || 'prestupek').replace(/\s+/g,'') + '.docx';
       try{
-        const file = new File([blob], filename, { type: 'application/rtf' });
+        const file = new File([blob], filename, { type: blob.type });
         if(navigator.canShare && navigator.canShare({ files: [file] })){
           await navigator.share({ files: [file] });
           return;
