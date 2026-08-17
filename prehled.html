@@ -130,7 +130,7 @@
     transition:opacity .1s ease;
   }
   .list-bottom-btn.print{color:var(--blue); background:var(--fill);}
-  .list-bottom-btn.word{color:var(--blue); background:var(--fill);}
+  .list-bottom-btn.oznameni{color:var(--blue); background:var(--fill);}
   .list-bottom-btn.resolve{color:var(--green); background:var(--fill);}
   .list-bottom-btn.resolve[disabled]{background:var(--green); color:#fff; opacity:1;}
   .list-bottom-btn.back{background:var(--blue); color:#fff;}
@@ -281,7 +281,7 @@
       <div class="submit-note" id="detailNote"></div>
       <div class="list-bottom-bar">
         <button class="list-bottom-btn print" id="printBtn" title="Vytisknout">Tisk</button>
-        <button class="list-bottom-btn word" id="wordBtn" title="Stáhnout jako Word">Word</button>
+        <button class="list-bottom-btn oznameni" id="oznameniBtn" title="Stáhnout jako Oznámení přestupku (Word)">Oznámení</button>
         <button class="list-bottom-btn resolve" id="resolveBtn">Vyřízeno</button>
         <button class="list-bottom-btn back" id="detailCloseBtn">Zpět</button>
       </div>
@@ -525,77 +525,213 @@
     return badge ? ('str. ' + badge) : ('str. ' + officerName);
   }
 
-  // ---------- Export do Wordu (.rtf) ----------
+  // ---------- Export "Oznámení přestupku" do Wordu (.rtf) ----------
   // RTF místo skutečného .docx záměrně — Word (macOS/Windows i mobilní appka)
   // ho otevře bez varování a bez nutnosti tahat do appky knihovnu na stavbu
   // OOXML/zip. Znaky mimo ASCII (diakritika, §) se escapují jako \uNNNN, aby
   // se zobrazily správně bez ohledu na výchozí kódování dokumentu.
+  //
+  // Šablona vychází z reálného vzoru "Oznámení přestupku" (Městský úřad
+  // Blansko, odbor dopravy). Appka doplní jen to, co sama zná — číslo
+  // jednací, strážníka, dnešní datum vytvoření, a v textu datum/čas/značku/
+  // adresu (+GPS pokud je uložené)/přestupek. Údaje o provozovateli vozidla
+  // (jméno, datum narození, bydliště) appka nemá k dispozici (zjišťují se
+  // až lustrací na úřadě) — zůstávají prázdné pro ruční doplnění.
+  const OZNAMENI_TEL = '775 859 486, 516 418 418';
+  const OZNAMENI_EMAIL = 'mp@blansko.cz';
+
   function rtfEscape(str){
     return String(str == null ? '' : str)
       .replace(/[\\{}]/g, c => '\\' + c)
       .replace(/[\u0080-\uffff]/g, c => '\\u' + c.charCodeAt(0) + '?');
   }
 
-  function buildNoticeRtf(record){
-    const line = (s) => rtfEscape(s) + '\\par\n';
-    let rtf = '{\\rtf1\\ansi\\ansicpg1250\\deff0{\\fonttbl{\\f0 Calibri;}}\\fs22\\f0\n';
-    rtf += '\\qc\n';
-    rtf += '\\b\\fs44 ' + line('VÝZVA');
-    rtf += '\\b0\\fs20 ' + line('pro nepřítomného pachatele přestupku');
-    if(record.noticeNumber){
-      rtf += '\\fs18 ' + line('Č. j.: ' + record.noticeNumber);
+  function todayCz(){
+    const d = new Date();
+    const pad = n => String(n).padStart(2,'0');
+    return pad(d.getDate()) + '.' + pad(d.getMonth()+1) + '.' + d.getFullYear();
+  }
+
+  function mmToTwips(mm){ return Math.round(mm * 56.6929); }
+
+  function base64ToHex(base64){
+    const raw = atob(base64);
+    const parts = new Array(raw.length);
+    for(let i=0;i<raw.length;i++){
+      parts[i] = raw.charCodeAt(i).toString(16).padStart(2,'0');
     }
+    return parts.join('');
+  }
+
+  function getImagePixelSize(dataUrl){
+    return new Promise((resolve)=>{
+      const img = new Image();
+      img.onload = ()=> resolve({ w: img.naturalWidth || 800, h: img.naturalHeight || 600 });
+      img.onerror = ()=> resolve({ w: 800, h: 600 });
+      img.src = dataUrl;
+    });
+  }
+
+  async function rtfPictureBlockFit(base64Jpeg, maxWidthMm, maxHeightMm){
+    const dims = await getImagePixelSize('data:image/jpeg;base64,' + base64Jpeg);
+    const hex = base64ToHex(base64Jpeg);
+    const aspect = dims.h / dims.w;
+    let goalWmm = maxWidthMm;
+    let goalHmm = goalWmm * aspect;
+    if(goalHmm > maxHeightMm){
+      goalHmm = maxHeightMm;
+      goalWmm = goalHmm / aspect;
+    }
+    const goalW = mmToTwips(goalWmm);
+    const goalH = mmToTwips(goalHmm);
+    return '{\\pict\\jpegblip\\picw' + dims.w + '\\pich' + dims.h +
+      '\\picwgoal' + goalW + '\\pichgoal' + goalH + '\n' + hex + '}\\par\n';
+  }
+
+
+
+  async function buildOznameniRtf(record, photosB64){
+    const line = (s) => rtfEscape(s) + '\\par\n';
+    let rtf = '{\\rtf1\\ansi\\ansicpg1250\\deff0{\\fonttbl{\\f0 Calibri;}}\\fs20\\f0\n';
+
+    rtf += line('Městský úřad Blansko');
+    rtf += line('Odbor dopravy');
+    rtf += line('Oddělení dopravních přestupků');
+    rtf += line('Nám. Republiky 1');
+    rtf += line('678 01 BLANSKO');
     rtf += '\\par\n';
-    rtf += '\\b\\fs52 ' + line(record.plate || '');
-    rtf += '\\b0\\fs22\\par\n';
-    rtf += line('Datum: ' + formatDateCz(record.date) + '    Čas: ' + (record.time || '—'));
+    rtf += rtfEscape('Naše  č. j.: ') + '\\b ' + rtfEscape(record.noticeNumber || '') + '\\b0\\par\n';
+    rtf += rtfEscape('Vyřizuje:    str. ' + (record.officerName || '')) + '\\par\n';
+    rtf += rtfEscape('Tel.:\t    ' + OZNAMENI_TEL) + '\\par\n';
+    rtf += rtfEscape('E-mail:\t   ' + OZNAMENI_EMAIL) + '\\par\n';
+    rtf += '\\par\n';
+    rtf += rtfEscape('Datum:\t    ' + todayCz()) + '\\par\n';
+    rtf += '\\par\\par\n';
+
+    rtf += '\\qc\\b\\fs28 ' + line('Oznámení přestupku') + '\\b0\\fs20\\ql\n';
+    rtf += '\\par\n';
+
+    const offenseCitation = record.offenseCitation || '';
+    const offenseLabel = record.offenseLabel || '';
+
+    rtf += rtfEscape(
+      'Podle § 10 odst. 2 zák. č. 553/91 Sb., o obecní policii, ve znění pozdějších předpisů, ' +
+      'Vám oznamuji podezření ze spáchání přestupku: Zákon č. 361/2000 Sb., o provozu na ' +
+      'pozemních komunikacích – ' + offenseCitation + ', jímž se dopustil(a) jednání – ' + offenseLabel +
+      ', z jehož spáchání je důvodně podezřelý(á):'
+    ) + '\\par\\par\n';
+
+    rtf += rtfEscape('Provozovatel vozidla RZ:\t' + (record.plate || '')) + '\\par\\par\n';
+    rtf += rtfEscape('Příjmení a jméno: \t\t') + '\\par\\par\n';
+    rtf += rtfEscape('Datum narození: \t\t') + '\\par\\par\n';
+    rtf += rtfEscape('Bydliště: \t\t\t') + '\\par\\par\n';
+
+    rtf += '\\b ' + line('Popis skutku:') + '\\b0\n';
+
+    let gpsPart = '';
+    if(record.lat != null && record.lng != null){
+      gpsPart = ' (GPS: ' + Number(record.lat).toFixed(6) + ', ' + Number(record.lng).toFixed(6) + ')';
+    }
+    rtf += rtfEscape(
+      'Dne ' + formatDateCz(record.date) + ' v ' + (record.time || '—') + ' hodin se neustanovený ' +
+      'řidič vozidla registrační značky ' + (record.plate || '') + '. Na ulici ' + (record.address || '') +
+      gpsPart + ' dopustil porušení ustanovení – ' + offenseLabel +
+      ', a tím je podezřelý ze spáchání přestupku dle ' + offenseCitation
+    ) + '\\par\\par\n';
+
+    rtf += rtfEscape('Lustrací byl(a), jako provozovatel výše uvedeného vozidla, zjištěn(a) výše jmenovaný(á).') + '\\par\\par\\par\n';
+
+    rtf += line('Ing. Martin Lepka');
+    rtf += line('ředitel MP Blansko');
+    rtf += '\\par\n';
+
+    rtf += rtfEscape('Přílohy:\t') + '\\par\n';
+    rtf += rtfEscape('- Výzva') + '\\par\n';
+    rtf += rtfEscape('- fotodokumentace') + '\\par\n';
+
+    // Nová stránka: každá fotka samostatně na vlastní A4 stránce v běžné
+    // velikosti (jen zmenšená tak, aby se vešla na stránku), výzva zvlášť
+    // v šíři 58 mm (odpovídá reálné šířce tiskárny).
+    if(photosB64.length){
+      rtf += '\\page\n';
+      rtf += '\\qc\\b\\fs24 ' + line('Fotodokumentace') + '\\b0\\fs20\\ql\n';
+      rtf += '\\par\n';
+      rtf += '\\qc\n';
+      for(let i=0;i<photosB64.length;i++){
+        rtf += await rtfPictureBlockFit(photosB64[i], 170, 240);
+        if(i < photosB64.length - 1) rtf += '\\page\\qc\n';
+      }
+    }
+
+    rtf += '\\page\n';
+    rtf += '\\qc\\b\\fs24 ' + line('Výzva') + '\\b0\\fs20\\ql\n';
+    rtf += '\\par\n';
+    rtf += '\\qc\n';
+
+    const cellWidth = mmToTwips(58);
+    rtf += '\\trowd\\trgaph80\\trleft0\\trbrdrt\\brdrs\\brdrw10\\trbrdrl\\brdrs\\brdrw10\\trbrdrb\\brdrs\\brdrw10\\trbrdrr\\brdrs\\brdrw10\\cellx' + cellWidth + '\n';
+    rtf += '\\intbl\\qc\\b\\fs22 ' + line('VÝZVA') + '\\b0\\fs14 ' + line('pro nepřítomného pachatele přestupku');
+    if(record.noticeNumber) rtf += '\\fs12 ' + line('Č. j.: ' + record.noticeNumber);
+    rtf += '\\par\n';
+    rtf += '\\b\\fs32 ' + line(record.plate || '') + '\\b0\\fs14\n';
+    rtf += line('Datum: ' + formatDateCz(record.date) + '  Čas: ' + (record.time || '—'));
     rtf += '\\par\n';
     if(record.address){
-      rtf += '\\b\\ul ' + line('Místo přestupku');
-      rtf += '\\ul0\\b0 ' + line(record.address);
+      rtf += '\\b\\fs13 ' + line('Místo přestupku') + '\\b0\n';
+      rtf += line(record.address);
       rtf += '\\par\n';
     }
-    if(record.offenseLabel){
-      rtf += '\\b\\ul ' + line('Právní kvalifikace přestupku');
-      rtf += '\\ul0\\b0 ' + line(record.offenseLabel);
-      if(record.offenseCitation){
-        rtf += '\\fs18 ' + line(record.offenseCitation) + '\\fs22\n';
-      }
-      rtf += '\\par\n';
+    if(offenseLabel){
+      rtf += '\\b\\fs13 ' + line('Právní kvalifikace') + '\\b0\n';
+      rtf += line(offenseLabel);
+      if(offenseCitation) rtf += '\\fs11 ' + line(offenseCitation) + '\\fs14\n';
     }
-    rtf += line('Dostavte se proto ve vlastním zájmu, a to neprodleně na Městskou policii Blansko, Sadová 2. Tuto výzvu vezměte s sebou.');
-    rtf += '\\par\n';
-    rtf += '\\b ' + line('POUČENÍ');
-    rtf += '\\b0\\fs18 ' + line('Dle § 11/odst. 1 a 2, zák. 553/1991 Sb., o obecní policii je osoba povinna výzvě vyhovět. Nedostavíte-li se bez dostatečné omluvy, můžete být dle § 11/odst. 8 výše uvedeného zákona předveden(a) nebo může být přestupek oznámen příslušnému správnímu orgánu k projednání.');
-    rtf += '\\fs22\\par\\par\n';
-    if(record.officerName){
-      rtf += '\\b ' + line('str. ' + record.officerName) + '\\b0\n';
-    }
-    rtf += '\\b ' + line('Městská policie Blansko') + '\\b0\n';
-    rtf += '\\fs18 ' + line('Sadová 149/2, 678 01 Blansko');
-    rtf += line('Tel.: 775 859 486, 516 418 418');
-    rtf += '\\fs14 ' + line('Vygenerováno aplikací RZ Scanner');
+    rtf += '\\cell\\row\n';
+    rtf += '\\pard\\par\n';
+
     rtf += '}';
     return rtf;
   }
 
-  async function exportNoticeWord(record){
-    const rtf = buildNoticeRtf(record);
-    const blob = new Blob([rtf], { type: 'application/rtf' });
-    const filename = 'Vyzva_' + (record.plate || 'prestupek').replace(/\s+/g,'') + '.rtf';
+  async function exportOznameni(record){
+    const btn = document.getElementById('oznameniBtn');
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Připravuji…';
     try{
-      const file = new File([blob], filename, { type: 'application/rtf' });
-      if(navigator.canShare && navigator.canShare({ files: [file] })){
-        await navigator.share({ files: [file] });
-        return;
+      // Fotky mohly být v této session už dřív načtené (viz openDetail /
+      // loadAndShowPhotos) — jinak je stejným způsobem dotáhneme teď.
+      let photosB64 = record._resolvedPhotos;
+      if(!photosB64 && record.hasPhotos){
+        const doc = await db.collection('prestupky').doc(record.id).collection('data').doc('photos').get();
+        const data = doc.exists ? doc.data() : null;
+        photosB64 = (data && data.photos) || [];
+        record._resolvedPhotos = photosB64;
+        record._resolvedMime = (data && data.photoMime) || 'image/jpeg';
       }
+      const rtf = await buildOznameniRtf(record, photosB64 || []);
+      const blob = new Blob([rtf], { type: 'application/rtf' });
+      const filename = 'Oznameni_' + (record.plate || 'prestupek').replace(/\s+/g,'') + '.rtf';
+      try{
+        const file = new File([blob], filename, { type: 'application/rtf' });
+        if(navigator.canShare && navigator.canShare({ files: [file] })){
+          await navigator.share({ files: [file] });
+          return;
+        }
+      }catch(e){
+        // Uživatel sdílení zrušil nebo API není k dispozici — spadneme na
+        // otevření v nové kartě, stejně jako u ukládání fotek.
+      }
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(()=> URL.revokeObjectURL(url), 60000);
     }catch(e){
-      // Uživatel sdílení zrušil nebo API není k dispozici — spadneme na
-      // otevření v nové kartě, stejně jako u ukládání fotek.
+      console.error('Export Oznámení selhal:', e);
+      setDetailNote('Vytvoření dokumentu se nezdařilo (' + e.message + ').', 'err');
+    }finally{
+      btn.disabled = false;
+      btn.textContent = originalText;
     }
-    const url = URL.createObjectURL(blob);
-    window.open(url, '_blank');
-    setTimeout(()=> URL.revokeObjectURL(url), 60000);
   }
 
   function buildStarPrintRequest(record){
@@ -892,8 +1028,8 @@
     if(currentDetailRecord) printViaStarWebPRNT(currentDetailRecord);
   });
 
-  document.getElementById('wordBtn').addEventListener('click', ()=>{
-    if(currentDetailRecord) exportNoticeWord(currentDetailRecord);
+  document.getElementById('oznameniBtn').addEventListener('click', ()=>{
+    if(currentDetailRecord) exportOznameni(currentDetailRecord);
   });
 
   document.getElementById('resolveBtn').addEventListener('click', async ()=>{

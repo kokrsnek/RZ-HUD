@@ -776,6 +776,10 @@
   // "Odeslat přestupek" can upload the exact same file the person just
   // reviewed in Safari, without re-rendering it.
   let lastGeneratedPdf = null;
+  // GPS souřadnice k aktuálnímu záznamu (odděleně od textové adresy) —
+  // potřebné jen pro export "Oznámení přestupku" v přehledu, appka sama
+  // adresu vždy zobrazuje jako text.
+  let lastResolvedGps = null;
   // If a submit was requested while logged out, resume it right after login.
   let pendingSubmitAfterLogin = false;
 
@@ -847,7 +851,9 @@
       };
       const extraData = {
         officerName: lastGeneratedPdf.officerName || null,
-        noticeNumber
+        noticeNumber,
+        lat: lastGeneratedPdf.lat != null ? lastGeneratedPdf.lat : null,
+        lng: lastGeneratedPdf.lng != null ? lastGeneratedPdf.lng : null
       };
       let extrasBlocked = false;
       try{
@@ -1158,6 +1164,7 @@
       if(location && location.address){
         document.getElementById('addressInput').value = location.address;
       }
+      lastResolvedGps = (location && location.lat != null) ? { lat: location.lat, lng: location.lng } : null;
     });
   });
 
@@ -1351,9 +1358,9 @@
 
   async function getLocationAndAddress(){
     const pos = await getBestPosition(8000);
-    if(!pos) return { address: '' };
+    if(!pos) return { address: '', lat: null, lng: null };
     const address = await reverseGeocode(pos.lat, pos.lng);
-    return { address };
+    return { address, lat: pos.lat, lng: pos.lng };
   }
 
   // Sends the photo to Plate Recognizer's ALPR API (specialized model trained
@@ -1424,6 +1431,7 @@
       addressInput.value = '';
       addressInput.placeholder = 'Místo se nepodařilo dohledat, zadejte ručně';
     }
+    lastResolvedGps = (location && location.lat != null) ? { lat: location.lat, lng: location.lng } : null;
 
     // Only surface something here when recognition genuinely failed —
     // routine confidence percentages aren't shown anymore since the camera
@@ -1734,6 +1742,8 @@
       // about to be shown for review, without recomputing anything.
       lastGeneratedPdf = {
         plate, date, time, address, offenseLabel, offenseCitation, officerName,
+        lat: lastResolvedGps ? lastResolvedGps.lat : null,
+        lng: lastResolvedGps ? lastResolvedGps.lng : null,
         photos: allPhotoDataUrls.map(u => u.split(',')[1])
       };
       document.getElementById('submitBtn').disabled = false;
